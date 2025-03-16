@@ -4,12 +4,15 @@ use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     net::TcpStream,
+    time::{Duration, Instant},
 };
 
 use hex;
 
 const SERVER_HOST: &str = "127.0.0.1";
 const SERVER_PORT: &str = "8080";
+const CHUNK: usize = 64 * 1024;
+const TIMEOUT: u64 = 10;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fetch length and checksum from /info endpoint
@@ -17,13 +20,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Checksum: {}", checksum);
 
     // Fetch data from / endpoint
-    let data = fetch_data()?;
-    println!("Data length: {}", data.len());
-    validate_data(data, checksum);
+    let data = fetch_data(checksum)?;
+    println!("Data downloaded successfully !!! length: {}", data.len());
 
+    // Optional: at this point, it is possible to write the data to a file ...
     Ok(())
 }
 
+/// Queries the endpoint `/info` to get the data SHA256 hash.
 fn fetch_info() -> Result<String, Box<dyn std::error::Error>> {
     // Create a new connection for the /info request
     let mut stream = TcpStream::connect(format!("{}:{}", SERVER_HOST, SERVER_PORT))?;
@@ -53,14 +57,52 @@ fn fetch_info() -> Result<String, Box<dyn std::error::Error>> {
     }
 }
 
-fn fetch_data() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+/// Wrapper around chunk queries
+/// Defines the container that will serve as a buffer for the downloaded chunks
+/// and concatenates them.
+/// A timeout over downloading all chunks has been implemented for safekeeping against infinite polling.
+fn fetch_data(expected_checksum: String) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // Define the starting point for queried chunks
+    let mut starting: usize = 0;
+
+    // Define the body
+    let mut body = Vec::new();
+
+    // For safekeeping, enforce a total timeout on downloading all the chunks, in case something goes wrong with the server connection.
+    let start_time = Instant::now();
+    let timeout_duration = Duration::from_secs(TIMEOUT);
+
+    while !validate_data(&body, &expected_checksum) {
+        // Check if the global timeout has been exceeded
+        if start_time.elapsed() > timeout_duration {
+            return Err("UhOooh !!! Global timeout exceeded while reading response body".into());
+        }
+
+        // Query a chunk
+        let chunk = fetch_data_chunk(starting)?;
+        // Optional: uncomment for verbose logging ...
+        // println!("chunk of size: {}", chunk.len());
+        body.extend(chunk.into_iter());
+        // Optional: uncomment for verbose logging ...
+        // println!("so far, body of size: {}", body.len());
+
+        // On to the next chunk
+        starting += CHUNK;
+    }
+
+    Ok(body)
+}
+
+fn fetch_data_chunk(starting: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     // Create a new connection for the / request
     let mut stream = TcpStream::connect(format!("{}:{}", SERVER_HOST, SERVER_PORT))?;
 
     // Send the / request
     let request = format!(
-        "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        SERVER_HOST
+        "GET / HTTP/1.1\r\nHost: {}\r\nRange: bytes={}-{}\r\nConnection: close\r\n\r\n",
+        SERVER_HOST,
+        starting,
+        starting + CHUNK
     );
     stream.write_all(request.as_bytes())?;
 
@@ -81,18 +123,25 @@ fn fetch_data() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     // then separate !
     let body = Vec::from(&body[separator_pos + 4..]);
 
+    // Print mssg
+    println!(
+        "chunk no {} downloaded successfully !!!",
+        starting / CHUNK + 1
+    );
+
     Ok(body)
 }
 
-fn validate_data(data: Vec<u8>, expected_checksum: String) {
+fn validate_data(data: &Vec<u8>, expected_checksum: &String) -> bool {
     let mut hasher = Sha256::new();
     hasher.update(data);
 
-    let message = if hex::encode(hasher.finalize()) == expected_checksum {
-        "All good ! the message is OK!"
-    } else {
-        "UhOh :( something seems to be missing ..."
-    };
+    // Optional: uncomment for verbose logging ...
+    // println!(
+    //     "body checksum so far = {}\nexpected = {}",
+    //     hex::encode(hasher.clone().finalize()),
+    //     expected_checksum
+    // );
 
-    println!("{message}");
+    hex::encode(hasher.finalize()) == *expected_checksum
 }
