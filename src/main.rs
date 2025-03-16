@@ -12,7 +12,7 @@ use hex;
 const SERVER_HOST: &str = "127.0.0.1";
 const SERVER_PORT: &str = "8080";
 const CHUNK: usize = 64 * 1024;
-const TIMEOUT: u64 = 10;
+const TIMEOUT: u64 = 30;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fetch length and checksum from /info endpoint
