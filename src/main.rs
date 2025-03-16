@@ -70,16 +70,8 @@ fn fetch_data(content_length: usize) -> Result<Vec<u8>, Box<dyn std::error::Erro
     );
     stream.write_all(request.as_bytes())?;
 
-    // Read the response headers
+    // Define buffer
     let mut buffer = [0; 1024];
-    let mut headers = Vec::new();
-    loop {
-        let bytes_read = stream.read(&mut buffer)?;
-        headers.extend_from_slice(&buffer[..bytes_read]);
-        if headers.ends_with(b"\r\n\r\n") {
-            break;
-        }
-    }
 
     // Read the response body
     let mut body = Vec::new();
