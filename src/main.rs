@@ -1,31 +1,30 @@
 use core::str;
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     net::TcpStream,
-    time::{Duration, Instant},
 };
+
+use hex;
 
 const SERVER_HOST: &str = "127.0.0.1";
 const SERVER_PORT: &str = "8080";
-const TIMEOUT: u64 = 5;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fetch length and checksum from /info endpoint
-    let (length, checksum) = fetch_info()?;
-
-    println!("Length: {}", length);
+    let checksum = fetch_info()?;
     println!("Checksum: {}", checksum);
 
     // Fetch data from / endpoint
-    let data = fetch_data(length)?;
-
+    let data = fetch_data()?;
     println!("Data length: {}", data.len());
+    validate_data(data, checksum);
 
     Ok(())
 }
 
-fn fetch_info() -> Result<(usize, String), Box<dyn std::error::Error>> {
+fn fetch_info() -> Result<String, Box<dyn std::error::Error>> {
     // Create a new connection for the /info request
     let mut stream = TcpStream::connect(format!("{}:{}", SERVER_HOST, SERVER_PORT))?;
 
@@ -43,25 +42,20 @@ fn fetch_info() -> Result<(usize, String), Box<dyn std::error::Error>> {
     // Convert the response to a string
     let response = str::from_utf8(&response)?;
 
-    // Extract length and checksum using regex
-    let rg = Regex::new(r#""length"\s*:\s*([0-9]+),\s*"sha256"\s*:\s*"([0-9a-zA-Z]+)"#).unwrap();
+    // Extract checksum using regex
+    let rg = Regex::new(r#""sha256"\s*:\s*"([0-9a-zA-Z]+)"#).unwrap();
     match rg.captures(response) {
-        None => Err("checksum/length regex does not match the request...".into()),
+        None => Err("checksum regex does not match the request...".into()),
         Some(captures) => {
-            let length = captures.get(1).unwrap().as_str().parse::<usize>()?;
-            let checksum = captures.get(2).unwrap().as_str().to_string();
-            Ok((length, checksum))
+            let checksum = captures.get(1).unwrap().as_str().to_string();
+            Ok(checksum)
         }
     }
 }
 
-fn fetch_data(content_length: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn fetch_data() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     // Create a new connection for the / request
     let mut stream = TcpStream::connect(format!("{}:{}", SERVER_HOST, SERVER_PORT))?;
-
-    // Set a timeout to drop the stream if reading tokes too long ...
-    let timeout_duration = Duration::from_secs(TIMEOUT);
-    let _ = stream.set_read_timeout(Some(timeout_duration.clone()));
 
     // Send the / request
     let request = format!(
@@ -70,35 +64,35 @@ fn fetch_data(content_length: usize) -> Result<Vec<u8>, Box<dyn std::error::Erro
     );
     stream.write_all(request.as_bytes())?;
 
-    // Define buffer
-    let mut buffer = [0; 1024];
-
     // Read the response body
     let mut body = Vec::new();
-    let mut bytes_read = 0;
 
-    // Since it is very likely the data is buggy, a fixed timer is useful to avoid indefinite loops to fetch empty sets of bytes
-    let start_time = Instant::now();
-    while bytes_read < content_length {
-        if start_time.elapsed() > timeout_duration {
-            // At this point, it is very likely that we received all the bytes from the buggy server...
-            return Ok(body);
-        }
-        match stream.read(&mut buffer) {
-            Ok(bytes) => {
-                body.extend_from_slice(&buffer[..bytes]);
-                bytes_read += bytes;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Handle timeout
-                return Err("Read operation timed out".into());
-            }
-            Err(e) => {
-                // Handle other errors
-                return Err(e.into());
-            }
-        }
-    }
+    let _ = stream.read_to_end(&mut body);
+
+    // There is still a point to take into account: So far, the body contains headers + data, one workaround is to
+    // parse into string and separate according to the special chars that separate body and headers
+
+    let body_str = String::from_utf8_lossy(&body);
+
+    let separator_pos = body_str
+        .find("\r\n\r\n")
+        .ok_or("Invalid response: no blank line found...")?;
+
+    // then separate !
+    let body = Vec::from(&body[separator_pos + 4..]);
 
     Ok(body)
+}
+
+fn validate_data(data: Vec<u8>, expected_checksum: String) {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+
+    let message = if hex::encode(hasher.finalize()) == expected_checksum {
+        "All good ! the message is OK!"
+    } else {
+        "UhOh :( something seems to be missing ..."
+    };
+
+    println!("{message}");
 }
